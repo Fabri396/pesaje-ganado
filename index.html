@@ -29,7 +29,7 @@
       font-weight: 650;
       margin: 12px 0 5px;
     }
-    input {
+    input, select {
       box-sizing: border-box;
       width: 100%;
       padding: 14px;
@@ -76,9 +76,10 @@
         <strong id="online">—</strong>
       </div>
       <div class="stat">
-        <span>Pendientes de subir</span>
+        <span>Pesajes pendientes</span>
         <strong id="pending">0</strong>
       </div>
+      <div class="stat"><span>Animales nuevos pendientes</span><strong id="pendingAnimals">0</strong></div>
       <div class="stat">
         <span>Animales descargados</span>
         <strong id="known">0</strong>
@@ -114,6 +115,21 @@
       <button id="save" type="button">
         Guardar peso y siguiente animal
       </button>
+    </section>
+
+    <section>
+      <h3>Agregar animal nuevo (funciona offline)</h3>
+      <label for="newInterno">Arete interno *</label><input id="newInterno" autocomplete="off">
+      <label for="newMag">ID MAG (opcional)</label><input id="newMag" autocomplete="off">
+      <label for="newSexo">Sexo</label><select id="newSexo"><option>MACHO</option><option>HEMBRA</option></select>
+      <label for="newRaza">Raza</label><input id="newRaza">
+      <label for="newLote">Lote de entrada</label><input id="newLote">
+      <label for="newAparto">Aparto de entrada</label><input id="newAparto">
+      <label for="newFecha">Fecha de compra *</label><input id="newFecha" type="date">
+      <label for="newPeso">Peso inicial (kg) *</label><input id="newPeso" type="number" inputmode="decimal" min="1" step="0.1">
+      <label for="newPrecio">Precio por kilogramo (₡) *</label><input id="newPrecio" type="number" inputmode="decimal" min="0" step="0.01">
+      <button id="addAnimal" type="button">Guardar animal nuevo</button>
+      <p class="muted">Se guardará en el teléfono y se creará en el inventario al sincronizar. Después puedes registrar su pesaje normalmente.</p>
     </section>
 
     <section>

@@ -1,7 +1,7 @@
 
 'use strict';
 
-const CACHE = 'pesaje-offline-v4';
+const CACHE = 'pesaje-offline-v5';
 
 const ASSETS = [
   './',

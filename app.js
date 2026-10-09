@@ -7,6 +7,7 @@ const dbName = 'ganado-offline-v1';
 let db;
 let animals = {};
 let records = [];
+let newAnimals = [];
 let busy = false;
 
 function request(req) {
@@ -160,6 +161,7 @@ async function refresh() {
   const today = records.filter(
     r => r.fecha === $('date').value
   );
+  $('pendingAnimals').textContent = newAnimals.filter(a => !a.synced).length;
 
   const known = today.filter(
     r => r.gain !== null &&
@@ -203,7 +205,8 @@ function setBusy(value) {
     'save',
     'download',
     'sync',
-    'deletePending'
+    'deletePending',
+    'addAnimal'
   ]) {
     $(id).disabled = value;
   }
@@ -236,18 +239,12 @@ async function save() {
 
   const animal = result.animal;
 
-  const duplicate = records.some(r => {
-    if (r.fecha !== fecha) return false;
-
-    if (animal) {
-      return recordBelongsTo(r, animal);
-    }
-
-    return !r.animalId && norm(r.arete) === arete;
-  });
-
-  if (duplicate) {
-    alert('Ese animal ya tiene un pesaje registrado en esta fecha.');
+  const existing = records.find(r => r.fecha === fecha && (
+    animal ? recordBelongsTo(r, animal) : !r.animalId && norm(r.arete) === arete
+  ));
+  if (existing && !confirm('Ya existe un pesaje para este animal en esta fecha. ¿Actualizarlo?')) return;
+  if (!animal) {
+    alert('El animal no está en el inventario. Agrégalo primero desde “Agregar animal nuevo”.');
     return;
   }
 
@@ -264,6 +261,7 @@ async function save() {
   const row = {
     id: crypto.randomUUID(),
     arete,
+    animalUid: animal?.uid || (animal?.id && !animal.id.startsWith('INT:') && !animal.id.startsWith('MAG:') ? animal.id : null),
     animalId: animal ? animal.id : null,
     peso,
     fecha,
@@ -276,6 +274,10 @@ async function save() {
   setBusy(true);
 
   try {
+    if (existing) {
+      // Una corrección es una operación nueva: el servidor la aplica sobre el mismo bloque.
+      await request(store('records', 'readwrite').delete(existing.id));
+    }
     await request(store('records', 'readwrite').add(row));
 
     $('tag').value = '';
@@ -367,6 +369,9 @@ async function download() {
     }
 
     animals = response.animals;
+    for (const a of newAnimals) if (!a.synced) {
+      animals[a.uid] = {id:a.uid,uid:a.uid,interno:a.interno,mag:a.mag,lote:a.lote,history:[{fecha:a.fechaCompra,peso:Number(a.pesoInicial)}],duplicate:false};
+    }
 
     await set('animals', animals);
     await set('url', url);
@@ -383,6 +388,45 @@ async function download() {
   }
 }
 
+async function postAndVerify(url,key,action,statusAction,batch) {
+  const body=new URLSearchParams({key,action,batch:JSON.stringify(batch)});
+  await fetch(url,{method:'POST',mode:'no-cors',body});
+  let verified=[];
+  for(let attempt=0;attempt<5;attempt++) {
+    const response=await jsonp(url,{action:statusAction,key,ids:batch.map(r=>r.id).join(',')});
+    if(!response.ok) throw Error(response.error||'No se pudo verificar la sincronización');
+    verified=response.ids||[];
+    if(batch.every(r=>verified.includes(r.id))) return;
+    await new Promise(resolve=>setTimeout(resolve,1500));
+  }
+  throw Error('No se confirmó la sincronización. Revisa el inventario y vuelve a intentar.');
+}
+
+async function addAnimal() {
+  if(busy) return;
+  const interno=norm($('newInterno').value),mag=norm($('newMag').value);
+  const fechaCompra=$('newFecha').value,pesoInicial=Number($('newPeso').value);
+  const precioKg=Number($('newPrecio').value);
+  if(!interno||!fechaCompra||!($('newPeso').value)||!(pesoInicial>0)||!($('newPrecio').value)||!Number.isFinite(precioKg)||precioKg<0) {
+    alert('Completa identificación interna, fecha, peso inicial y precio por kilo.');return;
+  }
+  if(Object.values(animals).some(a=>[interno,mag].filter(Boolean).some(t=>norm(a.interno)===t||norm(a.mag)===t))) {
+    alert('Ya existe un animal activo con ese arete o ID MAG.');return;
+  }
+  const uid=crypto.randomUUID();
+  const a={id:crypto.randomUUID(),uid,interno,mag,sexo:$('newSexo').value,raza:$('newRaza').value.trim(),lote:$('newLote').value.trim(),aparto:$('newAparto').value.trim(),fechaCompra,pesoInicial,precioKg,synced:false};
+  setBusy(true);
+  try {
+    newAnimals.push(a);
+    await set('newAnimals',newAnimals);
+    animals[uid]={id:uid,uid,interno,mag,lote:a.lote,history:[{fecha:fechaCompra,peso:pesoInicial}],duplicate:false};
+    await set('animals',animals);
+    for(const id of ['newInterno','newMag','newRaza','newLote','newAparto','newPeso','newPrecio']) $(id).value='';
+    await refresh();
+    $('message').textContent='Animal guardado offline. Se creará en Google Sheets al sincronizar.';
+  } catch(error) {alert('No se pudo guardar: '+error.message);} finally {setBusy(false);}
+}
+
 async function sync() {
   if (busy) return;
   setBusy(true);
@@ -397,68 +441,30 @@ async function sync() {
     await set('url', url);
     await set('key', key);
 
+    const animalPending = newAnimals.filter(a => !a.synced);
+    if (animalPending.length) {
+      for (let i=0;i<animalPending.length;i+=20) {
+        const batch=animalPending.slice(i,i+20);
+        await postAndVerify(url,key,'animals','animalStatus',batch);
+        for(const a of batch) {a.synced=true;}
+        await set('newAnimals',newAnimals);
+      }
+    }
     const pending = records.filter(r => !r.synced);
 
-    if (!pending.length) {
+
+    if (!pending.length && !animalPending.length) {
       $('message').textContent = 'No hay registros pendientes.';
       return;
     }
 
     for (let i = 0; i < pending.length; i += 20) {
       const batch = pending.slice(i, i + 20);
-
-      $('message').textContent =
-        'Enviando ' +
-        Math.min(i + 20, pending.length) +
-        '/' + pending.length + '...';
-
-      const body = new URLSearchParams({
-        key,
-        batch: JSON.stringify(batch)
-      });
-
-      await fetch(url, {
-        method: 'POST',
-        mode: 'no-cors',
-        body
-      });
-
-      let verified = [];
-
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const result = await jsonp(url, {
-          action: 'status',
-          key,
-          ids: batch.map(r => r.id).join(',')
-        });
-
-        if (!result.ok) {
-          throw Error(result.error || 'Error al verificar');
-        }
-
-        verified = result.ids || [];
-
-        if (verified.length === batch.length) break;
-
-        await new Promise(resolve =>
-          setTimeout(resolve, 1200)
-        );
-      }
-
+      $('message').textContent = 'Enviando pesajes '+Math.min(i+20,pending.length)+'/'+pending.length+'...';
+      await postAndVerify(url,key,'weights','status',batch);
       for (const record of batch) {
-        if (verified.includes(record.id)) {
-          record.synced = true;
-          await request(
-            store('records', 'readwrite').put(record)
-          );
-        }
-      }
-
-      if (verified.length !== batch.length) {
-        throw Error(
-          'Algunos registros no fueron confirmados. ' +
-          'No se borraron: reintenta sincronizar.'
-        );
+        record.synced=true;
+        await request(store('records','readwrite').put(record));
       }
     }
 
@@ -605,6 +611,9 @@ async function start() {
   $('url').value = await get('url') || '';
   $('key').value = await get('key') || '';
   animals = await get('animals') || {};
+  newAnimals = await get('newAnimals') || [];
+  for(const a of newAnimals) if(!a.synced) animals[a.uid]={id:a.uid,uid:a.uid,interno:a.interno,mag:a.mag,lote:a.lote,history:[{fecha:a.fechaCompra,peso:Number(a.pesoInicial)}],duplicate:false};
+  $('newFecha').value = $('date').value;
 
   await refresh();
 
@@ -616,6 +625,7 @@ async function start() {
 }
 
 $('save').onclick = save;
+$('addAnimal').onclick = addAnimal;
 $('download').onclick = download;
 $('sync').onclick = sync;
 $('backup').onclick = csv;
