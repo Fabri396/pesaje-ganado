@@ -7,37 +7,13 @@ const dbName = 'ganado-offline-v1';
 let db;
 let animals = {};
 let records = [];
+let busy = false;
 
 function request(req) {
   return new Promise((resolve, reject) => {
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
-}
-
-async function start() {
-  db = await new Promise((resolve, reject) => {
-    const req = indexedDB.open(dbName, 1);
-
-    req.onupgradeneeded = () => {
-      const database = req.result;
-      database.createObjectStore('settings');
-      database.createObjectStore('records', { keyPath: 'id' });
-    };
-
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-
-  $('date').value = new Date().toLocaleDateString('en-CA');
-  $('url').value = await get('url') || '';
-  $('key').value = await get('key') || '';
-  animals = await get('animals') || {};
-
-  await refresh();
-
-  navigator.serviceWorker?.register('./sw.js').catch(() => {});
-  updateOnline();
 }
 
 function store(name, mode = 'readonly') {
@@ -53,13 +29,21 @@ async function set(key, value) {
 }
 
 function norm(value) {
-  return String(value ?? '')
+  return String(value == null ? '' : value)
     .trim()
     .replace(/\.0$/, '')
     .toUpperCase();
 }
 
-// Busca un animal usando el arete interno o el ID MAG.
+function daysBetween(a, b) {
+  return Math.round(
+    (
+      Date.parse(b + 'T12:00:00') -
+      Date.parse(a + 'T12:00:00')
+    ) / 86400000
+  );
+}
+
 function resolveAnimal(tag) {
   tag = norm(tag);
 
@@ -67,188 +51,167 @@ function resolveAnimal(tag) {
     return { animal: null, ambiguous: false };
   }
 
-  const matches = new Map();
+  const matches = Object.entries(animals)
+    .filter(([key, value]) => {
+      return norm(value.interno) === tag ||
+        norm(value.mag) === tag ||
+        (!value.id && norm(key) === tag);
+    })
+    .map(([key, value]) => ({
+      ...value,
+      id: value.id || 'INT:' + norm(key),
+      interno: value.interno || (!value.id ? key : ''),
+      mag: value.mag || ''
+    }));
 
-  for (const [key, value] of Object.entries(animals)) {
-    const internal = norm(value.interno);
-    const mag = norm(value.mag);
-
-    // Inventario nuevo: una ficha por animal.
-    if (value.id && (internal === tag || mag === tag)) {
-      matches.set(value.id, value);
-    }
-
-    // Compatibilidad con el inventario anterior.
-    if (!value.id && norm(key) === tag) {
-      matches.set(key, { ...value, id: key });
-    }
-  }
-
-  if (matches.size > 1) {
+  if (matches.length > 1 || matches.some(a => a.duplicate)) {
     return { animal: null, ambiguous: true };
   }
 
   return {
-    animal: [...matches.values()][0] || null,
+    animal: matches[0] || null,
     ambiguous: false
   };
 }
 
-// Determina si un registro corresponde al mismo animal.
-function recordBelongsTo(record, animal, enteredTag) {
-  if (animal) {
-    if (record.animalId) {
-      return record.animalId === animal.id;
-    }
+function recordBelongsTo(record, animal) {
+  if (!animal) return false;
 
-    // Compatibilidad con registros anteriores.
-    const oldTag = norm(record.arete);
-
-    return oldTag === norm(animal.interno) ||
-           oldTag === norm(animal.mag) ||
-           oldTag === norm(animal.id);
+  if (record.animalId) {
+    return record.animalId === animal.id;
   }
 
-  return !record.animalId &&
-         norm(record.arete) === norm(enteredTag);
+  const oldTag = norm(record.arete);
+  const resolved = resolveAnimal(oldTag);
+
+  return !resolved.ambiguous &&
+    resolved.animal?.id === animal.id;
 }
 
-function lastFor(tag, date) {
-  const result = resolveAnimal(tag);
+function lastFor(animal, date) {
+  if (!animal) return null;
 
-  if (result.ambiguous) return null;
-
-  const animal = result.animal;
-
-  const history = (animal?.history || []).map(item => ({
-    fecha: item.fecha,
-    peso: item.peso
-  }));
+  const history = (animal.history || [])
+    .map(h => ({
+      fecha: h.fecha,
+      peso: Number(h.peso)
+    }));
 
   for (const record of records) {
-    if (
-      recordBelongsTo(record, animal, norm(tag)) &&
-      record.fecha < date
-    ) {
+    if (recordBelongsTo(record, animal)) {
       history.push({
         fecha: record.fecha,
-        peso: record.peso
+        peso: Number(record.peso)
       });
     }
   }
 
   return history
-    .filter(item => item.fecha < date)
+    .filter(h =>
+      h.fecha < date &&
+      Number.isFinite(h.peso)
+    )
     .sort((a, b) => b.fecha.localeCompare(a.fecha))[0] || null;
 }
 
-function daysBetween(first, second) {
-  return Math.round(
-    (
-      Date.parse(second + 'T12:00:00') -
-      Date.parse(first + 'T12:00:00')
-    ) / 86400000
-  );
+function showAnimal() {
+  const tag = norm($('tag').value);
+  const date = $('date').value;
+  const result = resolveAnimal(tag);
+
+  if (!tag) {
+    $('animal').textContent =
+      'Escribe un arete para consultar el último peso.';
+    return;
+  }
+
+  if (result.ambiguous) {
+    $('animal').textContent =
+      '⚠️ Identificación repetida o ambigua. Revisa el inventario.';
+    return;
+  }
+
+  if (!result.animal) {
+    $('animal').textContent =
+      '⚠️ Arete desconocido. Se registrará para revisión.';
+    return;
+  }
+
+  const animal = result.animal;
+  const prev = lastFor(animal, date);
+
+  $('animal').textContent =
+    'Arete interno: ' + (animal.interno || '—') +
+    ' · ID MAG: ' + (animal.mag || '—') +
+    ' · Lote: ' + (animal.lote || 'sin lote') +
+    ' · Último peso: ' +
+    (prev ? prev.peso + ' kg (' + prev.fecha + ')' : 'sin pesaje previo');
 }
 
 async function refresh() {
   records = await request(store('records').getAll());
 
   $('pending').textContent =
-    records.filter(record => !record.synced).length;
+    records.filter(r => !r.synced).length;
 
-  $('known').textContent = Object.keys(animals).length;
+  $('known').textContent =
+    Object.keys(animals).length;
 
-  const rows = records.filter(
-    record => record.fecha === $('date').value
+  const today = records.filter(
+    r => r.fecha === $('date').value
   );
 
-  const known = rows.filter(
-    record => record.gain !== null &&
-              record.gain !== undefined
+  const known = today.filter(
+    r => r.gain !== null &&
+         r.gain !== undefined &&
+         Number.isFinite(Number(r.gain))
   );
 
   const gain = known.reduce(
-    (total, record) => total + record.gain, 0
+    (sum, r) => sum + Number(r.gain), 0
   );
 
-  const validDays = known.filter(record => record.days > 0);
+  const avg = known.filter(r => r.days > 0);
 
-  const average = validDays.length
+  const averageGrams = avg.length
     ? (
-        validDays.reduce(
-          (total, record) =>
-            total + record.gain * 1000 / record.days,
+        avg.reduce(
+          (sum, r) =>
+            sum + Number(r.gain) * 1000 / r.days,
           0
-        ) / validDays.length
+        ) / avg.length
       ).toFixed(0)
     : '—';
 
-  $('summary').innerHTML = `
-    <div class="stat">
-      <span>Registrados</span>
-      <b>${rows.length}</b>
-    </div>
-    <div class="stat">
-      <span>Con ganancia calculable</span>
-      <b>${known.length}</b>
-    </div>
-    <div class="stat">
-      <span>Kilos ganados</span>
-      <b>${gain.toFixed(1)} kg</b>
-    </div>
-    <div class="stat">
-      <span>Promedio gramos/día</span>
-      <b>${average}</b>
-    </div>
-  `;
+  $('summary').innerHTML =
+    '<div class="stat"><span>Registrados</span><b>' +
+    today.length + '</b></div>' +
+    '<div class="stat"><span>Con ganancia calculable</span><b>' +
+    known.length + '</b></div>' +
+    '<div class="stat"><span>Kilos ganados</span><b>' +
+    gain.toFixed(1) + ' kg</b></div>' +
+    '<div class="stat"><span>Promedio gramos/día</span><b>' +
+    averageGrams + '</b></div>';
 
   showAnimal();
 }
 
-function showAnimal() {
-  const tag = norm($('tag').value);
-  const result = resolveAnimal(tag);
-  const animal = result.animal;
+function setBusy(value) {
+  busy = value;
 
-  if (!tag) {
-    $('animal').textContent =
-      'Escribe el arete interno o ID MAG.';
-    return;
+  for (const id of [
+    'save',
+    'download',
+    'sync',
+    'deletePending'
+  ]) {
+    $(id).disabled = value;
   }
-
-  if (result.ambiguous) {
-    $('animal').textContent =
-      '⚠️ Identificación ambigua: coincide con varios animales.';
-    return;
-  }
-
-  if (!animal) {
-    $('animal').textContent =
-      '⚠️ Arete desconocido: se registrará para revisión.';
-    return;
-  }
-
-  if (animal.duplicate) {
-    $('animal').textContent =
-      '⚠️ Identificación duplicada en inventario.';
-    return;
-  }
-
-  const previous = lastFor(tag, $('date').value);
-
-  $('animal').textContent =
-    `Interno: ${animal.interno || '—'} · ` +
-    `MAG: ${animal.mag || '—'} · ` +
-    `Lote: ${animal.lote || 'sin lote'} · ` +
-    `Último peso: ${
-      previous
-        ? previous.peso + ' kg (' + previous.fecha + ')'
-        : 'sin pesaje previo'
-    }`;
 }
 
 async function save() {
+  if (busy) return;
+
   const arete = norm($('tag').value);
   const peso = Number($('weight').value);
   const fecha = $('date').value;
@@ -265,26 +228,32 @@ async function save() {
   }
 
   const result = resolveAnimal(arete);
+
+  if (result.ambiguous) {
+    alert('Este arete es ambiguo. Revisa el inventario.');
+    return;
+  }
+
   const animal = result.animal;
 
-  if (result.ambiguous || animal?.duplicate) {
-    alert('Identificación duplicada o ambigua. Revisa el inventario.');
+  const duplicate = records.some(r => {
+    if (r.fecha !== fecha) return false;
+
+    if (animal) {
+      return recordBelongsTo(r, animal);
+    }
+
+    return !r.animalId && norm(r.arete) === arete;
+  });
+
+  if (duplicate) {
+    alert('Ese animal ya tiene un pesaje registrado en esta fecha.');
     return;
   }
 
-  const alreadyExists = records.some(record =>
-    record.fecha === fecha &&
-    recordBelongsTo(record, animal, arete)
-  );
-
-  if (alreadyExists) {
-    alert('Este animal ya fue pesado en esta fecha.');
-    return;
-  }
-
-  const previous = lastFor(arete, fecha);
-  const days = previous
-    ? daysBetween(previous.fecha, fecha)
+  const prev = lastFor(animal, fecha);
+  const days = prev
+    ? daysBetween(prev.fecha, fecha)
     : null;
 
   if (days !== null && days <= 0) {
@@ -294,28 +263,38 @@ async function save() {
 
   const row = {
     id: crypto.randomUUID(),
-    animalId: animal?.id || null,
     arete,
+    animalId: animal ? animal.id : null,
     peso,
     fecha,
-    gain: previous ? peso - previous.peso : null,
+    gain: prev ? peso - prev.peso : null,
     days,
     lote: animal?.lote || '',
     synced: false
   };
 
-  await request(store('records', 'readwrite').add(row));
+  setBusy(true);
 
-  $('tag').value = '';
-  $('weight').value = '';
+  try {
+    await request(store('records', 'readwrite').add(row));
 
-  await refresh();
-  $('tag').focus();
+    $('tag').value = '';
+    $('weight').value = '';
+
+    await refresh();
+    $('message').textContent = 'Pesaje guardado en este teléfono.';
+    $('tag').focus();
+  } catch (error) {
+    alert('No se pudo guardar el pesaje: ' + error.message);
+  } finally {
+    setBusy(false);
+  }
 }
 
 function updateOnline() {
-  $('online').textContent =
-    navigator.onLine ? 'Con Internet' : 'Sin Internet';
+  $('online').textContent = navigator.onLine
+    ? 'Con Internet'
+    : 'Sin Internet';
 }
 
 function config() {
@@ -347,7 +326,8 @@ function jsonp(url, params) {
       script.remove();
       delete window[cb];
 
-      error ? reject(error) : resolve(data);
+      if (error) reject(error);
+      else resolve(data);
     }
 
     window[cb] = data => finish(null, data);
@@ -365,38 +345,48 @@ function jsonp(url, params) {
 }
 
 async function download() {
+  if (busy) return;
+  setBusy(true);
+
   try {
     const { url, key } = config();
 
     $('message').textContent = 'Descargando inventario...';
 
-    const result = await jsonp(url, {
+    const response = await jsonp(url, {
       action: 'inventory',
       key
     });
 
-    if (!result.ok) throw Error(result.error);
+    if (!response.ok) {
+      throw Error(response.error || 'Error desconocido');
+    }
 
-    if (!result.animals || typeof result.animals !== 'object') {
+    if (!response.animals || typeof response.animals !== 'object') {
       throw Error('El servidor no devolvió un inventario válido.');
     }
 
-    // Conserva los pesajes locales. Solo reemplaza el inventario.
-    animals = result.animals;
+    animals = response.animals;
 
     await set('animals', animals);
     await set('url', url);
     await set('key', key);
+
     await refresh();
 
     $('message').textContent =
       'Inventario descargado. Ya puedes pesar sin Internet.';
   } catch (error) {
     $('message').textContent = 'Error: ' + error.message;
+  } finally {
+    setBusy(false);
   }
 }
 
 async function sync() {
+  if (busy) return;
+  setBusy(true);
+
   try {
     const { url, key } = config();
 
@@ -407,7 +397,7 @@ async function sync() {
     await set('url', url);
     await set('key', key);
 
-    const pending = records.filter(record => !record.synced);
+    const pending = records.filter(r => !r.synced);
 
     if (!pending.length) {
       $('message').textContent = 'No hay registros pendientes.';
@@ -418,7 +408,9 @@ async function sync() {
       const batch = pending.slice(i, i + 20);
 
       $('message').textContent =
-        `Enviando ${Math.min(i + 20, pending.length)}/${pending.length}...`;
+        'Enviando ' +
+        Math.min(i + 20, pending.length) +
+        '/' + pending.length + '...';
 
       const body = new URLSearchParams({
         key,
@@ -437,16 +429,20 @@ async function sync() {
         const result = await jsonp(url, {
           action: 'status',
           key,
-          ids: batch.map(record => record.id).join(',')
+          ids: batch.map(r => r.id).join(',')
         });
 
-        if (!result.ok) throw Error(result.error);
+        if (!result.ok) {
+          throw Error(result.error || 'Error al verificar');
+        }
 
-        verified = result.ids;
+        verified = result.ids || [];
 
         if (verified.length === batch.length) break;
 
-        await new Promise(resolve => setTimeout(resolve, 1200));
+        await new Promise(resolve =>
+          setTimeout(resolve, 1200)
+        );
       }
 
       for (const record of batch) {
@@ -471,45 +467,46 @@ async function sync() {
     $('message').textContent =
       'Sincronización verificada. Registros guardados en Google Sheets.';
   } catch (error) {
+    await refresh();
+
     $('message').textContent =
       'Error: ' + error.message +
       '\nLos registros locales se conservan.';
+  } finally {
+    setBusy(false);
   }
 }
 
 function csv() {
   const rows = [
     [
-      'ID', 'Fecha', 'Arete', 'ID animal',
-      'Peso kg', 'Ganancia kg', 'Días',
-      'Lote', 'Sincronizado'
+      'ID', 'Fecha', 'Arete', 'ID animal', 'Peso kg',
+      'Ganancia kg', 'Días', 'Lote', 'Sincronizado'
     ],
-    ...records.map(record => [
-      record.id,
-      record.fecha,
-      record.arete,
-      record.animalId || '',
-      record.peso,
-      record.gain ?? '',
-      record.days ?? '',
-      record.lote,
-      record.synced ? 'Sí' : 'No'
+    ...records.map(r => [
+      r.id,
+      r.fecha,
+      r.arete,
+      r.animalId || '',
+      r.peso,
+      r.gain ?? '',
+      r.days ?? '',
+      r.lote || '',
+      r.synced ? 'Sí' : 'No'
     ])
   ];
 
-  const data = '\ufeff' + rows
-    .map(row =>
-      row.map(value =>
-        '"' + String(value).replace(/"/g, '""') + '"'
-      ).join(';')
-    )
-    .join('\r\n');
+  const data = '\ufeff' + rows.map(row =>
+    row.map(value =>
+      '"' + String(value).replace(/"/g, '""') + '"'
+    ).join(';')
+  ).join('\r\n');
 
-  const link = document.createElement('a');
   const blob = new Blob([data], {
     type: 'text/csv;charset=utf-8'
   });
 
+  const link = document.createElement('a');
   link.href = URL.createObjectURL(blob);
   link.download =
     'respaldo_pesajes_' +
@@ -521,16 +518,118 @@ function csv() {
   setTimeout(() => URL.revokeObjectURL(link.href), 3000);
 }
 
+async function deletePending() {
+  if (busy) return;
+
+  try {
+    const current = await request(
+      store('records').getAll()
+    );
+
+    const pending = current.filter(r => !r.synced);
+
+    if (!pending.length) {
+      alert('No hay pesajes pendientes de sincronización.');
+      return;
+    }
+
+    const confirmed = confirm(
+      '¿Eliminar ' + pending.length + ' pesajes pendientes?\n\n' +
+      'Esta acción no se puede deshacer.\n' +
+      'Los pesajes sincronizados y el inventario se conservarán.\n\n' +
+      'Se recomienda exportar primero un respaldo CSV.'
+    );
+
+    if (!confirmed) return;
+
+    setBusy(true);
+
+    const transaction = db.transaction('records', 'readwrite');
+    const recordsStore = transaction.objectStore('records');
+
+    const finished = new Promise((resolve, reject) => {
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(
+        transaction.error || Error('Transacción cancelada')
+      );
+    });
+
+    // Comprobar nuevamente el estado dentro de la transacción.
+    const all = await request(recordsStore.getAll());
+
+    for (const record of all) {
+      if (!record.synced) {
+        recordsStore.delete(record.id);
+      }
+    }
+
+    await finished;
+    await refresh();
+
+    $('message').textContent =
+      'Se eliminaron los pesajes pendientes. ' +
+      'El inventario y los registros sincronizados se conservaron.';
+
+  } catch (error) {
+    $('message').textContent =
+      'Error al borrar pendientes: ' + error.message;
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function start() {
+  db = await new Promise((resolve, reject) => {
+    const open = indexedDB.open(dbName, 1);
+
+    open.onupgradeneeded = () => {
+      const database = open.result;
+
+      if (!database.objectStoreNames.contains('settings')) {
+        database.createObjectStore('settings');
+      }
+
+      if (!database.objectStoreNames.contains('records')) {
+        database.createObjectStore('records', {
+          keyPath: 'id'
+        });
+      }
+    };
+
+    open.onsuccess = () => resolve(open.result);
+    open.onerror = () => reject(open.error);
+  });
+
+  $('date').value = new Date().toLocaleDateString('en-CA');
+  $('url').value = await get('url') || '';
+  $('key').value = await get('key') || '';
+  animals = await get('animals') || {};
+
+  await refresh();
+
+  navigator.serviceWorker
+    ?.register('./sw.js')
+    .catch(() => {});
+
+  updateOnline();
+}
+
 $('save').onclick = save;
 $('download').onclick = download;
 $('sync').onclick = sync;
 $('backup').onclick = csv;
+$('deletePending').onclick = deletePending;
+
 $('tag').oninput = showAnimal;
 $('date').onchange = refresh;
 
 addEventListener('online', updateOnline);
 addEventListener('offline', updateOnline);
 
-start().catch(error =>
-  alert('No se pudo iniciar almacenamiento local: ' + error.message)
-);
+start().catch(error => {
+  alert(
+    'No se pudo iniciar almacenamiento local: ' +
+    error.message
+  );
+});

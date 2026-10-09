@@ -1,1 +1,174 @@
-<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#164d36"><link rel="manifest" href="manifest.webmanifest"><title>Pesaje de ganado</title><style>body{font-family:system-ui,sans-serif;background:#f1f5f1;color:#173629;margin:0}main{max-width:490px;margin:auto;padding:20px}h1{font-size:25px}section{background:white;border-radius:16px;padding:17px;margin:13px 0;box-shadow:0 2px 9px #0001}label{display:block;font-size:13px;font-weight:650;margin:12px 0 5px}input{box-sizing:border-box;width:100%;padding:14px;border:1px solid #c4d2c8;border-radius:10px;font-size:20px}button{width:100%;background:#176344;color:white;border:0;border-radius:11px;padding:15px;font-size:16px;font-weight:700;margin-top:12px}button.secondary{background:#e2efe6;color:#17442e}.muted{color:#5c6f62;font-size:13px}.stat{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #eee}.status{font-weight:700}#message{white-space:pre-wrap}.danger{color:#ad3737}</style></head><body><main><h1>🐂 Pesaje de ganado</h1><p class="muted">Registro local sin conexión · Google Sheets al sincronizar</p><section><div class="stat"><span>Conexión</span><strong id="online">—</strong></div><div class="stat"><span>Pendientes de subir</span><strong id="pending">0</strong></div><div class="stat"><span>Animales descargados</span><strong id="known">0</strong></div></section><section><label for="date">Fecha del pesaje</label><input id="date" type="date"><label for="tag">Número de arete</label><input id="tag" autocomplete="off" autocapitalize="characters" placeholder="Ej. 125"><p id="animal" class="muted">Escribe un arete para consultar el último peso.</p><label for="weight">Peso actual (kg)</label><input id="weight" type="number" inputmode="decimal" min="1" step="0.1" placeholder="Ej. 285.5"><button id="save">Guardar peso y siguiente animal</button></section><section><h3>Resumen del pesaje local</h3><div id="summary"></div><button class="secondary" id="backup">Exportar copia CSV</button></section><section><h3>Sincronización</h3><label for="url">URL de aplicación web Apps Script</label><input id="url" style="font-size:13px" placeholder="https://script.google.com/macros/s/.../exec"><label for="key">Clave configurada en Code.gs</label><input id="key" type="password" style="font-size:15px" placeholder="Clave de sincronización"><button class="secondary" id="download">Descargar inventario (con Internet)</button><button id="sync">Sincronizar pesajes pendientes</button><p id="message" class="muted"></p></section><p class="muted">No borres los datos del navegador ni desinstales la aplicación antes de sincronizar o exportar tus registros. Instálala en pantalla de inicio para usarla sin conexión.</p></main><script src="app.js"></script></body></html>
+
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#164d36">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <title>Pesaje de ganado</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      background: #f1f5f1;
+      color: #173629;
+      margin: 0;
+    }
+    main { max-width: 490px; margin: auto; padding: 20px; }
+    h1 { font-size: 25px; }
+    section {
+      background: white;
+      border-radius: 16px;
+      padding: 17px;
+      margin: 13px 0;
+      box-shadow: 0 2px 9px #0001;
+    }
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 650;
+      margin: 12px 0 5px;
+    }
+    input {
+      box-sizing: border-box;
+      width: 100%;
+      padding: 14px;
+      border: 1px solid #c4d2c8;
+      border-radius: 10px;
+      font-size: 20px;
+    }
+    button {
+      width: 100%;
+      background: #176344;
+      color: white;
+      border: 0;
+      border-radius: 11px;
+      padding: 15px;
+      font-size: 16px;
+      font-weight: 700;
+      margin-top: 12px;
+    }
+    button:disabled { opacity: .55; }
+    button.secondary { background: #e2efe6; color: #17442e; }
+    button.danger-button { background: #a62f36; color: white; }
+    .muted { color: #5c6f62; font-size: 13px; }
+    .stat {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 0;
+      border-bottom: 1px solid #eee;
+    }
+    #message { white-space: pre-wrap; }
+    .danger { color: #ad3737; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>🐂 Pesaje de ganado</h1>
+    <p class="muted">
+      Registro local sin conexión · Google Sheets al sincronizar
+    </p>
+
+    <section>
+      <div class="stat">
+        <span>Conexión</span>
+        <strong id="online">—</strong>
+      </div>
+      <div class="stat">
+        <span>Pendientes de subir</span>
+        <strong id="pending">0</strong>
+      </div>
+      <div class="stat">
+        <span>Animales descargados</span>
+        <strong id="known">0</strong>
+      </div>
+    </section>
+
+    <section>
+      <label for="date">Fecha del pesaje</label>
+      <input id="date" type="date">
+
+      <label for="tag">Número de arete interno o ID MAG</label>
+      <input
+        id="tag"
+        autocomplete="off"
+        autocapitalize="characters"
+        placeholder="Escribe cualquiera de los dos aretes"
+      >
+
+      <p id="animal" class="muted">
+        Escribe un arete para consultar el último peso.
+      </p>
+
+      <label for="weight">Peso actual (kg)</label>
+      <input
+        id="weight"
+        type="number"
+        inputmode="decimal"
+        min="1"
+        step="0.1"
+        placeholder="Ej. 285.5"
+      >
+
+      <button id="save" type="button">
+        Guardar peso y siguiente animal
+      </button>
+    </section>
+
+    <section>
+      <h3>Resumen del pesaje local</h3>
+      <div id="summary"></div>
+
+      <button class="secondary" id="backup" type="button">
+        Exportar copia CSV
+      </button>
+
+      <button class="danger-button" id="deletePending" type="button">
+        Borrar pesajes pendientes
+      </button>
+
+      <p class="muted">
+        El borrado solo afecta los pesajes que aún no están
+        marcados como sincronizados en este teléfono.
+      </p>
+    </section>
+
+    <section>
+      <h3>Sincronización</h3>
+
+      <label for="url">URL de aplicación web Apps Script</label>
+      <input
+        id="url"
+        style="font-size:13px"
+        placeholder="https://script.google.com/macros/s/.../exec"
+      >
+
+      <label for="key">Clave configurada en Code.gs</label>
+      <input
+        id="key"
+        type="password"
+        style="font-size:15px"
+        placeholder="Clave de sincronización"
+      >
+
+      <button class="secondary" id="download" type="button">
+        Descargar inventario (con Internet)
+      </button>
+
+      <button id="sync" type="button">
+        Sincronizar pesajes pendientes
+      </button>
+
+      <p id="message" class="muted"></p>
+    </section>
+
+    <p class="muted">
+      No borres los datos del navegador ni desinstales la aplicación
+      antes de sincronizar o exportar tus registros.
+    </p>
+  </main>
+
+  <script src="./app.js"></script>
+</body>
+</html>

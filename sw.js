@@ -1,7 +1,7 @@
 
 'use strict';
 
-const CACHE = 'pesaje-offline-v2';
+const CACHE = 'pesaje-offline-v4';
 
 const ASSETS = [
   './',
@@ -22,16 +22,14 @@ self.addEventListener('install', event => {
 self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys()
-      .then(keys =>
-        Promise.all(
-          keys
-            .filter(key =>
-              key.startsWith('pesaje-offline-') &&
-              key !== CACHE
-            )
-            .map(key => caches.delete(key))
-        )
-      )
+      .then(keys => Promise.all(
+        keys
+          .filter(key =>
+            key.startsWith('pesaje-offline-') &&
+            key !== CACHE
+          )
+          .map(key => caches.delete(key))
+      ))
       .then(() => self.clients.claim())
   );
 });
