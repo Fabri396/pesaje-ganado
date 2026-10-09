@@ -161,6 +161,7 @@ async function refresh() {
   const today = records.filter(
     r => r.fecha === $('date').value
   );
+  renderLocalRecords(today);
   $('pendingAnimals').textContent = newAnimals.filter(a => !a.synced).length;
 
   const known = today.filter(
@@ -186,8 +187,8 @@ async function refresh() {
     : '—';
 
   $('summary').innerHTML =
-    '<div class="stat"><span>Registrados</span><b>' +
-    today.length + '</b></div>' +
+    '<div class="stat"><span>Registrados (incluye sincronizados)</span><b>' +
+  today.length + '</b></div>' +
     '<div class="stat"><span>Con ganancia calculable</span><b>' +
     known.length + '</b></div>' +
     '<div class="stat"><span>Kilos ganados</span><b>' +
@@ -196,6 +197,85 @@ async function refresh() {
     averageGrams + '</b></div>';
 
   showAnimal();
+}
+
+function renderLocalRecords(today) {
+  const list = $('localRecords');
+  list.replaceChildren();
+
+  if (!today.length) {
+    list.textContent = 'No hay pesajes locales para esta fecha.';
+    return;
+  }
+
+  for (const record of today) {
+    const line = document.createElement('div');
+    line.className = 'local-record';
+
+    const info = document.createElement('span');
+
+    info.textContent =
+      `${record.arete} · ${record.peso} kg · ` +
+      (record.synced ? 'Sincronizado' : 'Pendiente');
+
+    const remove = document.createElement('button');
+
+    remove.type = 'button';
+    remove.className = 'danger-button compact';
+    remove.textContent = 'Eliminar';
+    remove.disabled = busy;
+
+    remove.onclick = () => deleteLocalRecord(record.id);
+
+    line.append(info, remove);
+    list.append(line);
+  }
+}
+
+async function deleteLocalRecord(id) {
+  if (busy) return;
+
+  const record = await request(store('records').get(id));
+
+  if (!record) {
+    await refresh();
+    return;
+  }
+
+  const warning = record.synced
+    ? 'Este pesaje ya figura como sincronizado. ' +
+      'Solo se eliminará la copia local; ' +
+      'NO se borrará de Google Sheets.'
+    : 'Este pesaje aún no está sincronizado ' +
+      'y se perderá si lo eliminas.';
+
+  const confirmed = confirm(
+    `¿Eliminar el pesaje del arete ${record.arete}, ` +
+    `${record.peso} kg, fecha ${record.fecha}?\n\n${warning}`
+  );
+
+  if (!confirmed) return;
+
+  setBusy(true);
+
+  try {
+    await request(
+      store('records', 'readwrite').delete(id)
+    );
+
+    await refresh();
+
+    $('message').textContent =
+      'Pesaje eliminado del almacenamiento local.';
+
+  } catch (error) {
+    $('message').textContent =
+      'Error al eliminar: ' + error.message;
+
+  } finally {
+    setBusy(false);
+    await refresh();
+  }
 }
 
 function setBusy(value) {
@@ -228,6 +308,9 @@ async function save() {
   ) {
     alert('Ingresa arete, fecha y peso válido.');
     return;
+    
+  document.querySelectorAll('#localRecords button')
+  .forEach(button => button.disabled = value);
   }
 
   const result = resolveAnimal(arete);
